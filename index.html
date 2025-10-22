@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <title>YouTube Parent Gate</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body{font:16px system-ui,Arial;margin:24px}
+    h1{margin:0 0 12px}
+    .row{margin:10px 0}
+    table{border-collapse:collapse;width:100%}
+    td,th{border:1px solid #ddd;padding:8px;vertical-align:top}
+    button{padding:6px 12px;margin:0 4px;border-radius:8px;border:0;cursor:pointer}
+    .ok{background:#3ea6ff}
+    .deny{background:#ff6b6b}
+    input[type=password]{padding:8px;width:360px;max-width:100%}
+    .note{color:#666;font-size:14px}
+    .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#eee;margin-right:6px}
+  </style>
+</head>
+<body>
+  <h1>Запросы YouTube</h1>
+
+  <div class="row">
+    <label>Токен (PAT) для управления Issues:
+      <input id="token" type="password" placeholder="вставьте один раз и сохраните" />
+    </label>
+    <button id="save">Сохранить</button>
+    <span class="note">Нужны права: Issues (read/write) только для этого репо.</span>
+  </div>
+
+  <div class="row">
+    <table id="tbl">
+      <thead>
+        <tr>
+          <th>Время</th><th>Кто</th><th>Мин</th><th>Ссылка</th><th>Статус</th><th>Действия</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+<script>
+const owner = "NexorSL";          // <= твой username
+const repo  = "yt-gate";          // <= имя репозитория
+const api   = `https://api.github.com/repos/${owner}/${repo}`;
+
+function getToken(){ return localStorage.getItem("pg_token") || ""; }
+function setToken(t){ localStorage.setItem("pg_token", t||""); }
+
+async function gh(path, opt={}){
+  opt.headers = Object.assign(
+    {"Accept":"application/vnd.github+json"},
+    (opt.headers||{})
+  );
+  const t = getToken();
+  if (t) opt.headers.Authorization = "Bearer " + t;
+  const r = await fetch(api + path, opt);
+  if (!r.ok) throw new Error(r.status + " " + (await r.text()));
+  return r.json();
+}
+
+function issueToRow(i){
+  const url = (i.body?.match(/URL:\s*(\S+)/)||[])[1] || "";
+  const who = (i.body?.match(/WHO:\s*(.*)/)||[])[1] || "";
+  const min = (i.body?.match(/MINUTES:\s*(\d+)/)||[])[1] || "";
+  const ts  = new Date(i.created_at).toLocaleString();
+  const status = i.labels.map(l=>l.name).join(", ");
+  return `
+  <tr>
+    <td>${ts}</td>
+    <td>${who}</td>
+    <td>${min}</td>
+    <td><a href="${url}" target="_blank">${url}</a><div><span class="pill">#${i.number}</span></div></td>
+    <td>${status}</td>
+    <td>
+      <button class="ok" onclick="approve(${i.number})">Разрешить</button>
+      <button class="deny" onclick="deny(${i.number})">Отклонить</button>
+      <a href="https://github.com/${owner}/${repo}/issues/${i.number}" target="_blank">GitHub</a>
+    </td>
+  </tr>`;
+}
+
+async function load(){
+  // Берём последние открытые issues с лейблами pending/approved/denied
+  const q = `?state=open&per_page=50&labels=pending,approved,denied`;
+  const issues = await gh(`/issues${q}`);
+  document.querySelector("#tbl tbody").innerHTML = issues.map(issueToRow).join("");
+}
+
+async function setLabels(num, labels){
+  return gh(`/issues/${num}`, {
+    method:"PATCH",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ labels })
+  });
+}
+
+async function approve(num){
+  // Ставим labels: approved (снимаем pending)
+  const i = await gh(`/issues/${num}`);
+  const lbl = i.labels.map(l=>l.name).filter(n=>n!=="pending");
+  if (!lbl.includes("approved")) lbl.push("approved");
+  await setLabels(num, lbl);
+  await load();
+}
+async function deny(num){
+  const i = await gh(`/issues/${num}`);
+  const lbl = i.labels.map(l=>l.name).filter(n=>n!=="pending");
+  if (!lbl.includes("denied")) lbl.push("denied");
+  await setLabels(num, lbl);
+  await load();
+}
+
+document.getElementById("save").onclick = ()=>{
+  setToken(document.getElementById("token").value.trim());
+  alert("Сохранено. Токен хранится в localStorage этого браузера."); load();
+};
+document.getElementById("token").value = getToken();
+
+load(); setInterval(load, 3000);
+</script>
+</body>
+</html>
