@@ -5,21 +5,28 @@
   <title>YouTube Parent Gate</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body{font:16px system-ui,Arial;margin:24px}
-    h1{margin:0 0 12px}
-    .row{margin:10px 0}
-    table{border-collapse:collapse;width:100%}
-    td,th{border:1px solid #ddd;padding:8px;vertical-align:top}
-    button{padding:6px 12px;margin:0 4px;border-radius:8px;border:0;cursor:pointer}
-    .ok{background:#3ea6ff}
-    .deny{background:#ff6b6b}
-    input[type=password]{padding:8px;width:360px;max-width:100%}
-    .note{color:#666;font-size:14px}
-    .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#eee;margin-right:6px}
-  </style>
+  body{font:16px system-ui,Arial;margin:24px}
+  h1{margin:0 0 12px}
+  .row{margin:10px 0}
+  table{border-collapse:collapse;width:100%}
+  td,th{border:1px solid #ddd;padding:8px;vertical-align:top}
+  button{padding:6px 12px;margin:0 4px;border-radius:8px;border:0;cursor:pointer}
+  button[disabled]{opacity:.6;cursor:default}
+  .ok{background:#3ea6ff}
+  .deny{background:#ff6b6b}
+  .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#eee;margin-right:6px}
+  .status{display:inline-block;padding:2px 8px;border-radius:999px;font-weight:600}
+  .status.pending{background:#fff2b3;color:#6b5300}
+  .status.approved{background:#d8ffd8;color:#0b5a0b}
+  .status.denied{background:#ffd6d6;color:#7a0000}
+  tr.pending{background:#fffbea}
+  .muted{color:#666;font-size:14px}
+  .right{float:right}
+</style>
 </head>
 <body>
   <h1>Запросы YouTube</h1>
+  <h1>Запросы YouTube <span class="muted right">обновлено: <span id="lastUpdate">—</span></span></h1>
 
   <div class="row">
     <label>Токен (PAT) для управления Issues:
@@ -41,55 +48,95 @@
   </div>
 
 <script>
-const owner = "NexorSL";          // <= твой username
-const repo  = "yt-gate";          // <= имя репозитория
+const owner = "NexorSL";
+const repo  = "yt-gate";
 const api   = `https://api.github.com/repos/${owner}/${repo}`;
 
 function getToken(){ return localStorage.getItem("pg_token") || ""; }
 function setToken(t){ localStorage.setItem("pg_token", t||""); }
 
-async function gh(path, opt={}){
-  opt.headers = Object.assign(
-    {"Accept":"application/vnd.github+json"},
-    (opt.headers||{})
-  );
+function authHeaders(extra={}) {
+  const h = Object.assign({"Accept":"application/vnd.github+json"}, extra);
   const t = getToken();
-  if (t) opt.headers.Authorization = "Bearer " + t;
+  if (t) h.Authorization = "Bearer " + t;
+  return h;
+}
+
+// ---- GitHub API helpers ----
+async function gh(path, opt={}) {
+  opt.headers = authHeaders(opt.headers||{});
   const r = await fetch(api + path, opt);
   if (!r.ok) throw new Error(r.status + " " + (await r.text()));
   return r.json();
 }
 
-function issueToRow(i){
+// ETag для экономии перерисовок
+let lastEtag = null;
+
+async function listIssues() {
+  const headers = authHeaders();
+  if (lastEtag) headers["If-None-Match"] = lastEtag;
+  const r = await fetch(api + `/issues?state=open&per_page=50`, { headers, cache:"no-store" });
+  if (r.status === 304) return { notModified:true };
+  if (!r.ok) throw new Error(r.status + " " + (await r.text()));
+  lastEtag = r.headers.get("ETag");
+  const issues = await r.json();
+  const wanted = new Set(["pending","approved","denied"]);
+  const filtered = issues.filter(i => (i.labels||[]).some(l => wanted.has(l.name)));
+  return { issues: filtered };
+}
+
+// ---- UI rendering ----
+function statusPill(labels){
+  const set = new Set((labels||[]).map(l=>l.name));
+  if (set.has("approved")) return `<span class="status approved">approved</span>`;
+  if (set.has("denied"))   return `<span class="status denied">denied</span>`;
+  return `<span class="status pending">pending</span>`;
+}
+
+function isPending(labels){ return (labels||[]).some(l=>l.name==="pending"); }
+
+function rowHtml(i){
   const url = (i.body?.match(/URL:\s*(\S+)/)||[])[1] || "";
   const who = (i.body?.match(/WHO:\s*(.*)/)||[])[1] || "";
   const min = (i.body?.match(/MINUTES:\s*(\d+)/)||[])[1] || "";
   const ts  = new Date(i.created_at).toLocaleString();
-  const status = i.labels.map(l=>l.name).join(", ");
+  const trClass = isPending(i.labels) ? "pending" : "";
   return `
-  <tr>
+  <tr id="row-${i.number}" class="${trClass}">
     <td>${ts}</td>
-    <td>${who}</td>
+    <td>${who || ""}</td>
     <td>${min}</td>
     <td><a href="${url}" target="_blank">${url}</a><div><span class="pill">#${i.number}</span></div></td>
-    <td>${status}</td>
+    <td>${statusPill(i.labels)}</td>
     <td>
-      <button class="ok" onclick="approve(${i.number})">Разрешить</button>
-      <button class="deny" onclick="deny(${i.number})">Отклонить</button>
+      <button class="ok"   id="ok-${i.number}"   onclick="approve(${i.number})">Разрешить</button>
+      <button class="deny" id="deny-${i.number}" onclick="deny(${i.number})">Отклонить</button>
       <a href="https://github.com/${owner}/${repo}/issues/${i.number}" target="_blank">GitHub</a>
     </td>
   </tr>`;
 }
 
-async function load(){
-  // тянем все открытые issues и фильтруем по нужным лейблам на клиенте
-  const issues = await gh(`/issues?state=open&per_page=50`);
-  const wanted = new Set(["pending","approved","denied"]);
-  const filtered = issues.filter(i => (i.labels||[]).some(l => wanted.has(l.name)));
-  document.querySelector("#tbl tbody").innerHTML =
-    filtered.length ? filtered.map(issueToRow).join("") : `<tr><td colspan="6">Нет запросов</td></tr>`;
+let lastRenderedIds = ""; // для лишняя перерисовка не нужна
+
+async function load(force=false){
+  try {
+    const res = await listIssues();
+    if (res.notModified && !force) return; // нет изменений
+    const issues = res.issues || [];
+    const idsSig = issues.map(i=>i.number+"-"+(i.updated_at||i.created_at)).join(",");
+    if (idsSig === lastRenderedIds && !force) return;
+    lastRenderedIds = idsSig;
+
+    const tbody = document.querySelector("#tbl tbody");
+    tbody.innerHTML = issues.length ? issues.map(rowHtml).join("") : `<tr><td colspan="6">Нет запросов</td></tr>`;
+    document.getElementById("lastUpdate").textContent = new Date().toLocaleTimeString();
+  } catch (e) {
+    console.error(e);
+  }
 }
 
+// ---- Actions ----
 async function setLabels(num, labels){
   return gh(`/issues/${num}`, {
     method:"PATCH",
@@ -98,29 +145,54 @@ async function setLabels(num, labels){
   });
 }
 
-async function approve(num){
-  // Ставим labels: approved (снимаем pending)
-  const i = await gh(`/issues/${num}`);
-  const lbl = i.labels.map(l=>l.name).filter(n=>n!=="pending");
-  if (!lbl.includes("approved")) lbl.push("approved");
-  await setLabels(num, lbl);
-  await load();
-}
-async function deny(num){
-  const i = await gh(`/issues/${num}`);
-  const lbl = i.labels.map(l=>l.name).filter(n=>n!=="pending");
-  if (!lbl.includes("denied")) lbl.push("denied");
-  await setLabels(num, lbl);
-  await load();
+function toggleBusy(num, busy=true){
+  const okBtn   = document.getElementById(`ok-${num}`);
+  const denyBtn = document.getElementById(`deny-${num}`);
+  [okBtn, denyBtn].forEach(b=>{
+    if (!b) return;
+    b.disabled = busy;
+    if (busy) { b.dataset.prevText = b.textContent; b.textContent = "…"; }
+    else if (b.dataset.prevText) { b.textContent = b.dataset.prevText; delete b.dataset.prevText; }
+  });
 }
 
+async function approve(num){
+  try{
+    toggleBusy(num, true);
+    const i = await gh(`/issues/${num}`);
+    const lbl = i.labels.map(l=>l.name).filter(n=>n!=="pending" && n!=="denied");
+    if (!lbl.includes("approved")) lbl.push("approved");
+    await setLabels(num, lbl);
+    await load(true); // сразу перерисовать
+  } finally {
+    toggleBusy(num, false);
+  }
+}
+async function deny(num){
+  try{
+    toggleBusy(num, true);
+    const i = await gh(`/issues/${num}`);
+    const lbl = i.labels.map(l=>l.name).filter(n=>n!=="pending" && n!=="approved");
+    if (!lbl.includes("denied")) lbl.push("denied");
+    await setLabels(num, lbl);
+    await load(true);
+  } finally {
+    toggleBusy(num, false);
+  }
+}
+
+// ---- Token UI ----
 document.getElementById("save").onclick = ()=>{
   setToken(document.getElementById("token").value.trim());
-  alert("Сохранено. Токен хранится в localStorage этого браузера."); load();
+  alert("Сохранено. Токен хранится в localStorage этого браузера.");
+  lastEtag = null; // чтобы принудительно перезагрузить
+  load(true);
 };
 document.getElementById("token").value = getToken();
 
-load(); setInterval(load, 3000);
+// ---- Автообновление ----
+load(true);
+setInterval(() => load(false), 5000);
 </script>
 </body>
 </html>
