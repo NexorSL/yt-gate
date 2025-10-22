@@ -82,10 +82,12 @@ function issueToRow(i){
 }
 
 async function load(){
-  // Берём последние открытые issues с лейблами pending/approved/denied
-  const q = `?state=open&per_page=50&labels=pending,approved,denied`;
-  const issues = await gh(`/issues${q}`);
-  document.querySelector("#tbl tbody").innerHTML = issues.map(issueToRow).join("");
+  // тянем все открытые issues и фильтруем по нужным лейблам на клиенте
+  const issues = await gh(`/issues?state=open&per_page=50`);
+  const wanted = new Set(["pending","approved","denied"]);
+  const filtered = issues.filter(i => (i.labels||[]).some(l => wanted.has(l.name)));
+  document.querySelector("#tbl tbody").innerHTML =
+    filtered.length ? filtered.map(issueToRow).join("") : `<tr><td colspan="6">Нет запросов</td></tr>`;
 }
 
 async function setLabels(num, labels){
